@@ -2,39 +2,29 @@
 
 import base64
 import subprocess
+import time
 from typing import Optional
 
 
 def type_text(text: str, device_id: str | None = None) -> None:
     """
-    Type text into the currently focused input field using ADB Keyboard.
+    Type text into the currently focused input field using adb shell input text.
 
     Args:
         text: The text to type.
         device_id: Optional ADB device ID for multi-device setups.
-
-    Note:
-        Requires ADB Keyboard to be installed on the device.
-        See: https://github.com/nicnocquee/AdbKeyboard
     """
+    if not text:
+        return
     adb_prefix = _get_adb_prefix(device_id)
-    encoded_text = base64.b64encode(text.encode("utf-8")).decode("utf-8")
-
-    subprocess.run(
-        adb_prefix
-        + [
-            "shell",
-            "am",
-            "broadcast",
-            "-a",
-            "ADB_INPUT_B64",
-            "--es",
-            "msg",
-            encoded_text,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    escaped = text.replace("\\", "\\\\").replace(" ", "%s").replace("'", "\\'").replace('"', '\\"').replace("&", "\\&").replace("|", "\\|").replace(";", "\\;").replace("(", "\\(").replace(")", "\\)")
+    cmd = adb_prefix + ["shell", "input", "text", escaped]
+    print(f"  ⌨️  [type_text] text={text!r} escaped={escaped!r}")
+    print(f"  ⌨️  [type_text] cmd={' '.join(cmd)}")
+    t0 = time.time()
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    elapsed = time.time() - t0
+    print(f"  ⌨️  [type_text] done in {elapsed:.3f}s rc={result.returncode} stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}")
 
 
 def clear_text(device_id: str | None = None) -> None:
@@ -46,11 +36,22 @@ def clear_text(device_id: str | None = None) -> None:
     """
     adb_prefix = _get_adb_prefix(device_id)
 
+    print("  ⌨️  [clear_text] select all + delete")
+    t0 = time.time()
+    # Select all (Ctrl+A) then delete
     subprocess.run(
-        adb_prefix + ["shell", "am", "broadcast", "-a", "ADB_CLEAR_TEXT"],
+        adb_prefix + ["shell", "input", "keyevent", "KEYCODE_MOVE_HOME"],
         capture_output=True,
         text=True,
     )
+    subprocess.run(
+        adb_prefix + ["shell", "input", "keyevent", "--longpress"]
+        + ["KEYCODE_DEL"] * 20,
+        capture_output=True,
+        text=True,
+    )
+    elapsed = time.time() - t0
+    print(f"  ⌨️  [clear_text] done in {elapsed:.3f}s")
 
 
 def detect_and_set_adb_keyboard(device_id: str | None = None) -> str:

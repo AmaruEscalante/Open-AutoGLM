@@ -151,24 +151,26 @@ class ActionHandler:
     def _handle_type(self, action: dict, width: int, height: int) -> ActionResult:
         """Handle text input action."""
         text = action.get("text", "")
+        t_start = time.time()
+        print(f"  ⌨️  [_handle_type] START text={text!r} device={self.device_id}")
 
         device_factory = get_device_factory()
 
-        # Switch to ADB keyboard
-        original_ime = device_factory.detect_and_set_adb_keyboard(self.device_id)
-        time.sleep(TIMING_CONFIG.action.keyboard_switch_delay)
-
         # Clear existing text and type new text
         device_factory.clear_text(self.device_id)
-        time.sleep(TIMING_CONFIG.action.text_clear_delay)
+        t_after_clear = time.time()
+        print(f"  ⌨️  [_handle_type] clear_text took {t_after_clear - t_start:.3f}s")
 
-        # Handle multiline text by splitting on newlines
         device_factory.type_text(text, self.device_id)
-        time.sleep(TIMING_CONFIG.action.text_input_delay)
+        t_after_type = time.time()
+        print(f"  ⌨️  [_handle_type] type_text took {t_after_type - t_after_clear:.3f}s")
 
-        # Restore original keyboard
-        device_factory.restore_keyboard(original_ime, self.device_id)
-        time.sleep(TIMING_CONFIG.action.keyboard_restore_delay)
+        delay = TIMING_CONFIG.action.text_input_delay
+        print(f"  ⌨️  [_handle_type] sleeping {delay}s (text_input_delay)")
+        time.sleep(delay)
+
+        total = time.time() - t_start
+        print(f"  ⌨️  [_handle_type] DONE total={total:.3f}s")
 
         return ActionResult(True, False)
 

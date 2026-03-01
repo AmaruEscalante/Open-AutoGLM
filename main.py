@@ -35,7 +35,9 @@ from phone_agent.xctest import list_devices as list_ios_devices
 
 
 def check_system_requirements(
-    device_type: DeviceType = DeviceType.ADB, wda_url: str = "http://localhost:8100"
+    device_type: DeviceType = DeviceType.ADB,
+    wda_url: str = "http://localhost:8100",
+    device_id: str | None = None,
 ) -> bool:
     """
     Check system requirements before running the agent.
@@ -195,8 +197,11 @@ def check_system_requirements(
     if device_type == DeviceType.ADB:
         print("3. Checking ADB Keyboard...", end=" ")
         try:
+            adb_cmd = ["adb"]
+            if device_id:
+                adb_cmd += ["-s", device_id]
             result = subprocess.run(
-                ["adb", "shell", "ime", "list", "-s"],
+                adb_cmd + ["shell", "ime", "list", "-s"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -421,6 +426,14 @@ Examples:
         type=str,
         default=os.getenv("PHONE_AGENT_API_KEY", "EMPTY"),
         help="API key for model authentication",
+    )
+
+    parser.add_argument(
+        "--provider",
+        type=str,
+        choices=["openai", "anthropic"],
+        default=os.getenv("PHONE_AGENT_PROVIDER", "openai"),
+        help="Model provider: openai (default) or anthropic",
     )
 
     parser.add_argument(
@@ -737,11 +750,14 @@ def main():
         wda_url=args.wda_url
         if device_type == DeviceType.IOS
         else "http://localhost:8100",
+        device_id=args.device_id,
     ):
         sys.exit(1)
 
     # Check model API connectivity and model availability
-    if not check_model_api(args.base_url, args.model, args.apikey):
+    if args.provider == "anthropic":
+        print("🔍 Using Anthropic provider — skipping OpenAI API check.")
+    elif not check_model_api(args.base_url, args.model, args.apikey):
         sys.exit(1)
 
     # Create configurations and agent based on device type
@@ -750,6 +766,7 @@ def main():
         model_name=args.model,
         api_key=args.apikey,
         lang=args.lang,
+        provider=args.provider,
     )
 
     if device_type == DeviceType.IOS:

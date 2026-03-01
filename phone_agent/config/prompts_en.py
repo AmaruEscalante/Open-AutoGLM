@@ -75,5 +75,8 @@ REMEMBER:
 - Think before you act: Always analyze the current UI and the best course of action before executing any step, and output in <think> part.
 - Only ONE LINE of action in <answer> part per response: Each step must contain exactly one line of executable code.
 - Generate execution code strictly according to format requirements.
+- When the task has been completed (e.g., an app is opened, a message is sent, a search is done), you MUST call finish(message="...") immediately. Do not take extra actions after the goal is achieved.
+- Prefer using Launch action to open apps instead of tapping app icons.
+- The screen_info JSON tells you which app is currently in the foreground via "current_app". Use this to determine if the target app is already open.
 """
 )

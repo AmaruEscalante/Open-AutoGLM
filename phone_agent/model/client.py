@@ -1,4 +1,4 @@
-"""Model client for AI inference using OpenAI-compatible API."""
+"""Model client for AI inference using OpenAI-compatible or Anthropic API."""
 
 import json
 import time
@@ -23,6 +23,7 @@ class ModelConfig:
     frequency_penalty: float = 0.2
     extra_body: dict[str, Any] = field(default_factory=dict)
     lang: str = "cn"  # Language for UI messages: 'cn' or 'en'
+    provider: str = "openai"  # "openai" or "anthropic"
 
 
 @dataclass
@@ -40,7 +41,7 @@ class ModelResponse:
 
 class ModelClient:
     """
-    Client for interacting with OpenAI-compatible vision-language models.
+    Client for interacting with OpenAI-compatible or Anthropic vision-language models.
 
     Args:
         config: Model configuration.
@@ -48,7 +49,14 @@ class ModelClient:
 
     def __init__(self, config: ModelConfig | None = None):
         self.config = config or ModelConfig()
-        self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key)
+        if self.config.provider == "anthropic":
+            import anthropic
+
+            self.anthropic_client = anthropic.Anthropic(api_key=self.config.api_key)
+        else:
+            self.client = OpenAI(
+                base_url=self.config.base_url, api_key=self.config.api_key
+            )
 
     def request(self, messages: list[dict[str, Any]]) -> ModelResponse:
         """
@@ -63,7 +71,163 @@ class ModelClient:
         Raises:
             ValueError: If the response cannot be parsed.
         """
-        # Start timing
+        if self.config.provider == "anthropic":
+            return self._request_anthropic(messages)
+        return self._request_openai(messages)
+
+    def _convert_to_anthropic_messages(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Convert OpenAI-format messages to Anthropic format.
+
+        Returns:
+            Tuple of (system_prompt, anthropic_messages).
+        """
+        system_prompt = ""
+        anthropic_messages = []
+
+        for msg in messages:
+            if msg["role"] == "system":
+                system_prompt = msg["content"]
+                continue
+
+            if msg["role"] == "assistant":
+                anthropic_messages.append(
+                    {"role": "assistant", "content": msg["content"]}
+                )
+                continue
+
+            # User message — may contain images
+            if isinstance(msg["content"], list):
+                content_blocks = []
+                for item in msg["content"]:
+                    if item.get("type") == "image_url":
+                        url = item["image_url"]["url"]
+                        # Extract base64 data from data URI
+                        if url.startswith("data:"):
+                            media_type = url.split(";")[0].split(":")[1]
+                            b64_data = url.split(",", 1)[1]
+                            content_blocks.append(
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": b64_data,
+                                    },
+                                }
+                            )
+                    elif item.get("type") == "text":
+                        content_blocks.append(
+                            {"type": "text", "text": item["text"]}
+                        )
+                anthropic_messages.append(
+                    {"role": "user", "content": content_blocks}
+                )
+            else:
+                anthropic_messages.append(
+                    {"role": "user", "content": msg["content"]}
+                )
+
+        return system_prompt, anthropic_messages
+
+    def _request_anthropic(self, messages: list[dict[str, Any]]) -> ModelResponse:
+        """Send a request using the Anthropic API."""
+        start_time = time.time()
+        time_to_first_token = None
+        time_to_thinking_end = None
+
+        system_prompt, anthropic_messages = self._convert_to_anthropic_messages(
+            messages
+        )
+
+        stream = self.anthropic_client.messages.stream(
+            model=self.config.model_name,
+            max_tokens=self.config.max_tokens,
+            temperature=self.config.temperature,
+            system=system_prompt,
+            messages=anthropic_messages,
+        )
+
+        raw_content = ""
+        buffer = ""
+        action_markers = ["finish(message=", "do(action="]
+        in_action_phase = False
+        first_token_received = False
+
+        with stream as s:
+            for text in s.text_stream:
+                raw_content += text
+
+                if not first_token_received:
+                    time_to_first_token = time.time() - start_time
+                    first_token_received = True
+
+                if in_action_phase:
+                    continue
+
+                buffer += text
+
+                marker_found = False
+                for marker in action_markers:
+                    if marker in buffer:
+                        thinking_part = buffer.split(marker, 1)[0]
+                        print(thinking_part, end="", flush=True)
+                        print()
+                        in_action_phase = True
+                        marker_found = True
+                        if time_to_thinking_end is None:
+                            time_to_thinking_end = time.time() - start_time
+                        break
+
+                if marker_found:
+                    continue
+
+                is_potential_marker = False
+                for marker in action_markers:
+                    for i in range(1, len(marker)):
+                        if buffer.endswith(marker[:i]):
+                            is_potential_marker = True
+                            break
+                    if is_potential_marker:
+                        break
+
+                if not is_potential_marker:
+                    print(buffer, end="", flush=True)
+                    buffer = ""
+
+        total_time = time.time() - start_time
+        thinking, action = self._parse_response(raw_content)
+
+        lang = self.config.lang
+        print()
+        print("=" * 50)
+        print(f"⏱️  {get_message('performance_metrics', lang)}:")
+        print("-" * 50)
+        if time_to_first_token is not None:
+            print(
+                f"{get_message('time_to_first_token', lang)}: {time_to_first_token:.3f}s"
+            )
+        if time_to_thinking_end is not None:
+            print(
+                f"{get_message('time_to_thinking_end', lang)}:        {time_to_thinking_end:.3f}s"
+            )
+        print(
+            f"{get_message('total_inference_time', lang)}:          {total_time:.3f}s"
+        )
+        print("=" * 50)
+
+        return ModelResponse(
+            thinking=thinking,
+            action=action,
+            raw_content=raw_content,
+            time_to_first_token=time_to_first_token,
+            time_to_thinking_end=time_to_thinking_end,
+            total_time=total_time,
+        )
+
+    def _request_openai(self, messages: list[dict[str, Any]]) -> ModelResponse:
+        """Send a request using the OpenAI-compatible API."""
         start_time = time.time()
         time_to_first_token = None
         time_to_thinking_end = None
@@ -80,9 +244,9 @@ class ModelClient:
         )
 
         raw_content = ""
-        buffer = ""  # Buffer to hold content that might be part of a marker
+        buffer = ""
         action_markers = ["finish(message=", "do(action="]
-        in_action_phase = False  # Track if we've entered the action phase
+        in_action_phase = False
         first_token_received = False
 
         for chunk in stream:
@@ -92,39 +256,30 @@ class ModelClient:
                 content = chunk.choices[0].delta.content
                 raw_content += content
 
-                # Record time to first token
                 if not first_token_received:
                     time_to_first_token = time.time() - start_time
                     first_token_received = True
 
                 if in_action_phase:
-                    # Already in action phase, just accumulate content without printing
                     continue
 
                 buffer += content
 
-                # Check if any marker is fully present in buffer
                 marker_found = False
                 for marker in action_markers:
                     if marker in buffer:
-                        # Marker found, print everything before it
                         thinking_part = buffer.split(marker, 1)[0]
                         print(thinking_part, end="", flush=True)
-                        print()  # Print newline after thinking is complete
+                        print()
                         in_action_phase = True
                         marker_found = True
-
-                        # Record time to thinking end
                         if time_to_thinking_end is None:
                             time_to_thinking_end = time.time() - start_time
-
                         break
 
                 if marker_found:
-                    continue  # Continue to collect remaining content
+                    continue
 
-                # Check if buffer ends with a prefix of any marker
-                # If so, don't print yet (wait for more content)
                 is_potential_marker = False
                 for marker in action_markers:
                     for i in range(1, len(marker)):
@@ -135,17 +290,12 @@ class ModelClient:
                         break
 
                 if not is_potential_marker:
-                    # Safe to print the buffer
                     print(buffer, end="", flush=True)
                     buffer = ""
 
-        # Calculate total time
         total_time = time.time() - start_time
-
-        # Parse thinking and action from response
         thinking, action = self._parse_response(raw_content)
 
-        # Print performance metrics
         lang = self.config.lang
         print()
         print("=" * 50)
@@ -191,25 +341,25 @@ class ModelClient:
         Returns:
             Tuple of (thinking, action).
         """
-        # Rule 1: Check for finish(message=
+        # Rule 1: XML tag parsing (used by Claude and legacy models)
+        if "<answer>" in content:
+            parts = content.split("<answer>", 1)
+            thinking = parts[0].replace("<think>", "").replace("</think>", "").strip()
+            action = parts[1].replace("</answer>", "").strip()
+            return thinking, action
+
+        # Rule 2: Check for finish(message=
         if "finish(message=" in content:
             parts = content.split("finish(message=", 1)
             thinking = parts[0].strip()
             action = "finish(message=" + parts[1]
             return thinking, action
 
-        # Rule 2: Check for do(action=
+        # Rule 3: Check for do(action=
         if "do(action=" in content:
             parts = content.split("do(action=", 1)
             thinking = parts[0].strip()
             action = "do(action=" + parts[1]
-            return thinking, action
-
-        # Rule 3: Fallback to legacy XML tag parsing
-        if "<answer>" in content:
-            parts = content.split("<answer>", 1)
-            thinking = parts[0].replace("<think>", "").replace("</think>", "").strip()
-            action = parts[1].replace("</answer>", "").strip()
             return thinking, action
 
         # Rule 4: No markers found, return content as action
